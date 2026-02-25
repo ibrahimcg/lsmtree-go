@@ -213,3 +213,20 @@ func (sl *SkipList) IsImmutable() bool {
 	defer sl.mu.RUnlock()
 	return sl.immutable
 }
+
+// SkipListIterator walks a skip list in sorted key order via level-0 forward pointers.
+type SkipListIterator struct {
+	current *node
+}
+
+// NewIterator returns an iterator positioned at the first entry.
+func (sl *SkipList) NewIterator() *SkipListIterator {
+	sl.mu.RLock()
+	defer sl.mu.RUnlock()
+	return &SkipListIterator{current: sl.header.forward[0]}
+}
+
+func (it *SkipListIterator) Valid() bool { return it.current != nil }
+func (it *SkipListIterator) Key() string { return it.current.key }
+func (it *SkipListIterator) Value() []byte { return it.current.value }
+func (it *SkipListIterator) Next()         { it.current = it.current.forward[0] }

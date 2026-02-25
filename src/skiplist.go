@@ -27,16 +27,28 @@ type SkipList struct {
 	sizeBytes int64
 	maxBytes  int64
 	immutable bool
+	bloom     *BloomFilter
 	mu        sync.RWMutex
 }
 
 // NewSkipList creates a new skip list with a maximum byte capacity.
 // Pass 0 for unlimited size.
 func NewSkipList(maxBytes int64) *SkipList {
+	var expectedItems int
+	if maxBytes > 0 {
+		expectedItems = int(maxBytes / 64)
+		if expectedItems < 16 {
+			expectedItems = 16
+		}
+	} else {
+		expectedItems = 10000
+	}
+
 	return &SkipList{
 		header:   &node{forward: make([]*node, maxLevel)},
 		level:    0,
 		maxBytes: maxBytes,
+		bloom:    OptimalBloomFilter(expectedItems, 0.01),
 	}
 }
 
@@ -80,6 +92,7 @@ func (sl *SkipList) Insert(key string, value []byte) error {
 		}
 		sl.sizeBytes += diff
 		next.value = value
+		sl.bloom.Add(key)
 		return nil
 	}
 
@@ -107,6 +120,7 @@ func (sl *SkipList) Insert(key string, value []byte) error {
 	}
 	sl.sizeBytes += newEntrySize
 	sl.size++
+	sl.bloom.Add(key)
 	return nil
 }
 
@@ -125,6 +139,10 @@ func (sl *SkipList) SizeBytes() int64 {
 func (sl *SkipList) Search(key string) ([]byte, bool) {
 	sl.mu.RLock()
 	defer sl.mu.RUnlock()
+
+	if sl.immutable && !sl.bloom.MayContain(key) {
+		return nil, false
+	}
 
 	current := sl.header
 	for i := sl.level; i >= 0; i-- {

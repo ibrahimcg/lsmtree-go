@@ -1,9 +1,13 @@
 package main
 
 import (
+	"errors"
 	"math/rand"
 	"sync"
 )
+
+var ErrSkipListFull = errors.New("skiplist is full")
+var ErrImmutable = errors.New("skiplist is immutable")
 
 const (
 	maxLevel    = 16
@@ -17,17 +21,27 @@ type node struct {
 }
 
 type SkipList struct {
-	header *node
-	level  int
-	size   int
-	mu     sync.RWMutex
+	header    *node
+	level     int
+	size      int
+	sizeBytes int64
+	maxBytes  int64
+	immutable bool
+	mu        sync.RWMutex
 }
 
-func NewSkipList() *SkipList {
+// NewSkipList creates a new skip list with a maximum byte capacity.
+// Pass 0 for unlimited size.
+func NewSkipList(maxBytes int64) *SkipList {
 	return &SkipList{
-		header: &node{forward: make([]*node, maxLevel)},
-		level:  0,
+		header:   &node{forward: make([]*node, maxLevel)},
+		level:    0,
+		maxBytes: maxBytes,
 	}
+}
+
+func entrySize(key string, value []byte) int64 {
+	return int64(len(key)) + int64(len(value))
 }
 
 func (sl *SkipList) randomLevel() int {
@@ -38,9 +52,13 @@ func (sl *SkipList) randomLevel() int {
 	return lvl
 }
 
-func (sl *SkipList) Insert(key string, value []byte) {
+func (sl *SkipList) Insert(key string, value []byte) error {
 	sl.mu.Lock()
 	defer sl.mu.Unlock()
+
+	if sl.immutable {
+		return ErrImmutable
+	}
 
 	update := make([]*node, maxLevel)
 	current := sl.header
@@ -54,8 +72,20 @@ func (sl *SkipList) Insert(key string, value []byte) {
 
 	next := current.forward[0]
 	if next != nil && next.key == key {
+		oldSize := entrySize(key, next.value)
+		newSize := entrySize(key, value)
+		diff := newSize - oldSize
+		if diff > 0 && sl.maxBytes > 0 && sl.sizeBytes+diff > sl.maxBytes {
+			return ErrSkipListFull
+		}
+		sl.sizeBytes += diff
 		next.value = value
-		return
+		return nil
+	}
+
+	newEntrySize := entrySize(key, value)
+	if sl.maxBytes > 0 && sl.sizeBytes+newEntrySize > sl.maxBytes {
+		return ErrSkipListFull
 	}
 
 	newLevel := sl.randomLevel()
@@ -75,7 +105,21 @@ func (sl *SkipList) Insert(key string, value []byte) {
 		n.forward[i] = update[i].forward[i]
 		update[i].forward[i] = n
 	}
+	sl.sizeBytes += newEntrySize
 	sl.size++
+	return nil
+}
+
+func (sl *SkipList) IsFull() bool {
+	sl.mu.RLock()
+	defer sl.mu.RUnlock()
+	return sl.maxBytes > 0 && sl.sizeBytes >= sl.maxBytes
+}
+
+func (sl *SkipList) SizeBytes() int64 {
+	sl.mu.RLock()
+	defer sl.mu.RUnlock()
+	return sl.sizeBytes
 }
 
 func (sl *SkipList) Search(key string) ([]byte, bool) {
@@ -96,9 +140,13 @@ func (sl *SkipList) Search(key string) ([]byte, bool) {
 	return nil, false
 }
 
-func (sl *SkipList) Delete(key string) bool {
+func (sl *SkipList) Delete(key string) (bool, error) {
 	sl.mu.Lock()
 	defer sl.mu.Unlock()
+
+	if sl.immutable {
+		return false, ErrImmutable
+	}
 
 	update := make([]*node, maxLevel)
 	current := sl.header
@@ -112,7 +160,7 @@ func (sl *SkipList) Delete(key string) bool {
 
 	target := current.forward[0]
 	if target == nil || target.key != key {
-		return false
+		return false, nil
 	}
 
 	for i := 0; i <= sl.level; i++ {
@@ -125,12 +173,25 @@ func (sl *SkipList) Delete(key string) bool {
 	for sl.level > 0 && sl.header.forward[sl.level] == nil {
 		sl.level--
 	}
+	sl.sizeBytes -= entrySize(target.key, target.value)
 	sl.size--
-	return true
+	return true, nil
 }
 
 func (sl *SkipList) Len() int {
 	sl.mu.RLock()
 	defer sl.mu.RUnlock()
 	return sl.size
+}
+
+func (sl *SkipList) MarkImmutable() {
+	sl.mu.Lock()
+	defer sl.mu.Unlock()
+	sl.immutable = true
+}
+
+func (sl *SkipList) IsImmutable() bool {
+	sl.mu.RLock()
+	defer sl.mu.RUnlock()
+	return sl.immutable
 }

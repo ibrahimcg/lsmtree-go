@@ -1,0 +1,312 @@
+classDiagram
+    direction TB
+
+    %% ==================== Interfaces ====================
+    class Iterator {
+        <<interface>>
+        +Valid() bool
+        +Key() string
+        +Value() []byte
+        +IsTombstone() bool
+        +Next()
+    }
+
+    %% ==================== Bloom Filter ====================
+    class BloomFilter {
+        -bits []uint64
+        -numBits uint32
+        -numHash uint32
+        +Add(key string)
+        +MayContain(key string) bool
+        +Reset()
+        +NumBits() uint32
+        +NumHash() uint32
+    }
+
+    %% ==================== SkipList ====================
+    class node {
+        -key string
+        -value []byte
+        -forward []*node
+    }
+
+    class SkipList {
+        -header *node
+        -level int
+        -size int
+        -sizeBytes int64
+        -maxBytes int64
+        -immutable bool
+        -bloom *BloomFilter
+        -mu sync.RWMutex
+        +Insert(key string, value []byte) error
+        +Search(key string) ([]byte, bool)
+        +Delete(key string) (bool, error)
+        +IsFull() bool
+        +SizeBytes() int64
+        +Len() int
+        +MarkImmutable()
+        +IsImmutable() bool
+        +NewIterator() *SkipListIterator
+    }
+
+    class SkipListIterator {
+        -current *node
+        +Valid() bool
+        +Key() string
+        +Value() []byte
+        +IsTombstone() bool
+        +Next()
+    }
+
+    %% ==================== MemTable ====================
+    class MemTable {
+        -mu sync.RWMutex
+        -active *SkipList
+        -immutables []*SkipList
+        -maxBytes int64
+        +Insert(key string, value []byte) error
+        +Search(key string) ([]byte, bool)
+        +Delete(key string) error
+        +RotateActive()
+        +GetImmutables() []*SkipList
+        +RemoveImmutable(sl *SkipList)
+    }
+
+    %% ==================== SSTable Encoding ====================
+    class indexEntry {
+        -FirstKey string
+        -Offset uint64
+        -Size uint32
+    }
+
+    class footer {
+        -IndexOffset uint64
+        -IndexSize uint32
+        -BloomOffset uint64
+        -BloomSize uint32
+        -Magic uint64
+    }
+
+    %% ==================== SSTable Reader ====================
+    class SSTableReader {
+        -f *os.File
+        -index []indexEntry
+        -bloom *BloomFilter
+        +Search(key string) ([]byte, bool, error)
+        +Close() error
+    }
+
+    %% ==================== SSTable Iterator ====================
+    class SSTableIterator {
+        -reader *SSTableReader
+        -blockIdx int
+        -blockBuf []byte
+        -blockPos int
+        -key string
+        -value []byte
+        -tombstone bool
+        -valid bool
+        -err error
+        +Valid() bool
+        +Key() string
+        +Value() []byte
+        +IsTombstone() bool
+        +Next()
+        +Err() error
+    }
+
+    %% ==================== SSTable Writer ====================
+    class SSTableInfo {
+        +Path string
+        +MinKey string
+        +MaxKey string
+        +FileSize int64
+    }
+
+    class SSTableWriter {
+        +Dir string
+        -seq atomic.Uint64
+        +SetSeq(n uint64)
+        +WriteSSTable(sl *SkipList) (string, error)
+        +WriteFromIterator(iter Iterator, bloom *BloomFilter) (SSTableInfo, error)
+        +WriteLimitedFromIterator(iter Iterator, maxBytes int64, skipTombstones bool) (SSTableInfo, bool, error)
+    }
+
+    %% ==================== Merge Iterator ====================
+    class heapItem {
+        -key string
+        -value []byte
+        -tombstone bool
+        -srcIdx int
+        -iter Iterator
+    }
+
+    class mergeHeap {
+        -items []heapItem
+        +Len() int
+        +Less(i int, j int) bool
+        +Swap(i int, j int)
+        +Push(x any)
+        +Pop() any
+    }
+
+    class MergeIterator {
+        -h mergeHeap
+        -key string
+        -value []byte
+        -tombstone bool
+        -valid bool
+        +Valid() bool
+        +Key() string
+        +Value() []byte
+        +IsTombstone() bool
+        +Next()
+    }
+
+    %% ==================== Level Manager ====================
+    class SSTableMeta {
+        +Path string
+        +Level int
+        +MinKey string
+        +MaxKey string
+        +FileSize int64
+        +SeqNum uint64
+    }
+
+    class CompactionConfig {
+        +L0CompactionThreshold int
+        +LevelSizeMultiplier int
+        +L1MaxBytes int64
+        +MaxOutputFileSize int64
+        +MaxLevels int
+    }
+
+    class LevelManager {
+        -mu sync.RWMutex
+        -levels map~int, []*SSTableMeta~
+        -config CompactionConfig
+        -nextSeq uint64
+        +NextSeqNum() uint64
+        +SetNextSeqNum(seq uint64)
+        +AddSSTable(meta *SSTableMeta)
+        +RemoveSSTable(meta *SSTableMeta)
+        +GetLevel(n int) []*SSTableMeta
+        +GetOverlapping(level int, minKey string, maxKey string) []*SSTableMeta
+        +LevelSize(level int) int64
+        +MaxLevelSize(level int) int64
+        +NeedsCompaction() int
+        +PickCompactionInput(level int) []*SSTableMeta
+        +HasSStablesBelow(level int) bool
+        +LevelCount(level int) int
+    }
+
+    %% ==================== Compaction ====================
+    class Compactor {
+        -levels *LevelManager
+        -writer *SSTableWriter
+        -manifest *Manifest
+        -dir string
+        -dbMu *sync.RWMutex
+        -stopCh chan struct~
+        -doneCh chan struct~
+        +CompactLevel(level int) error
+        +Start()
+        +Stop()
+    }
+
+    %% ==================== Manifest ====================
+    class ManifestFileEntry {
+        +Path string
+        +Level int
+        +MinKey string
+        +MaxKey string
+        +FileSize int64
+        +SeqNum uint64
+    }
+
+    class VersionEdit {
+        +AddedFiles []ManifestFileEntry
+        +RemovedFiles []ManifestFileEntry
+    }
+
+    class Manifest {
+        -mu sync.Mutex
+        -f *os.File
+        -path string
+        +AppendEdit(edit VersionEdit) error
+        +Replay(cfg CompactionConfig) (*LevelManager, uint64, error)
+        +Close() error
+    }
+
+    %% ==================== Database ====================
+    class DBConfig {
+        +Dir string
+        +MaxMemBytes int64
+        +Compaction CompactionConfig
+    }
+
+    class DB {
+        -mu sync.RWMutex
+        -flushMu sync.Mutex
+        -closed atomic.Bool
+        -memtable *MemTable
+        -levels *LevelManager
+        -writer *SSTableWriter
+        -compact *Compactor
+        -manifest *Manifest
+        -dir string
+        -config DBConfig
+        +Put(key string, value []byte) error
+        +Get(key string) ([]byte, bool)
+        +Delete(key string) error
+        +Close() error
+        +RunCompaction() error
+    }
+
+    %% ==================== Relationships ====================
+
+    %% Interface implementations
+    SkipListIterator ..|> Iterator : implements
+    SSTableIterator ..|> Iterator : implements
+    MergeIterator ..|> Iterator : implements
+
+    %% Composition / Aggregation
+    SkipList *-- node : header
+    SkipList *-- BloomFilter : bloom
+    SkipListIterator --> node : current
+
+    MemTable *-- SkipList : active
+    MemTable o-- SkipList : immutables
+
+    SSTableReader *-- indexEntry : index[]
+    SSTableReader *-- BloomFilter : bloom
+
+    SSTableIterator --> SSTableReader : reader
+
+    MergeIterator *-- mergeHeap : h
+    mergeHeap *-- heapItem : items
+    heapItem --> Iterator : iter
+
+    LevelManager *-- SSTableMeta : levels
+    LevelManager *-- CompactionConfig : config
+
+    Compactor --> LevelManager : levels
+    Compactor --> SSTableWriter : writer
+    Compactor --> Manifest : manifest
+
+    Manifest --> VersionEdit : appends
+    VersionEdit *-- ManifestFileEntry : AddedFiles
+    VersionEdit *-- ManifestFileEntry : RemovedFiles
+
+    SSTableWriter --> Iterator : reads from
+    SSTableWriter --> SSTableInfo : produces
+
+    DBConfig *-- CompactionConfig : Compaction
+
+    DB *-- MemTable : memtable
+    DB *-- LevelManager : levels
+    DB *-- SSTableWriter : writer
+    DB *-- Compactor : compact
+    DB *-- Manifest : manifest
+    DB *-- DBConfig : config

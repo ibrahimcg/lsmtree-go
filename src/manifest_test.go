@@ -25,7 +25,7 @@ func TestManifestAppendAndReplay(t *testing.T) {
 	}
 
 	cfg := DefaultCompactionConfig()
-	lm, err := m.Replay(cfg)
+	lm, _, err := m.Replay(cfg)
 	if err != nil {
 		t.Fatalf("Replay: %v", err)
 	}
@@ -61,7 +61,7 @@ func TestManifestReopenAndReplay(t *testing.T) {
 	}
 	defer m2.Close()
 
-	lm, err := m2.Replay(DefaultCompactionConfig())
+	lm, _, err := m2.Replay(DefaultCompactionConfig())
 	if err != nil {
 		t.Fatalf("Replay: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestManifestAddRemoveRoundTrip(t *testing.T) {
 	})
 
 	cfg := DefaultCompactionConfig()
-	lm, err := m.Replay(cfg)
+	lm, _, err := m.Replay(cfg)
 	if err != nil {
 		t.Fatalf("Replay: %v", err)
 	}

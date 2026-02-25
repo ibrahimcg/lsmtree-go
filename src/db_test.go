@@ -1,10 +1,13 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"math/rand"
+	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
-	"time"
 )
 
 func TestDBPutGetDelete(t *testing.T) {
@@ -142,8 +145,10 @@ func TestDBCompactionIntegration(t *testing.T) {
 		delete(expected, key)
 	}
 
-	// Give compaction a moment to work.
-	time.Sleep(300 * time.Millisecond)
+	// Run compaction deterministically.
+	if err := db.RunCompaction(); err != nil {
+		t.Fatalf("RunCompaction: %v", err)
+	}
 
 	// Verify all remaining keys.
 	for key, want := range expected {
@@ -246,7 +251,9 @@ func TestDBEndToEnd(t *testing.T) {
 	}
 
 	// 5. Trigger compaction rounds and verify data integrity.
-	time.Sleep(500 * time.Millisecond)
+	if err := db2.RunCompaction(); err != nil {
+		t.Fatalf("RunCompaction: %v", err)
+	}
 
 	for key, want := range expected {
 		val, ok := db2.Get(key)
@@ -261,4 +268,213 @@ func TestDBEndToEnd(t *testing.T) {
 	if err := db2.Close(); err != nil {
 		t.Fatalf("Close (2): %v", err)
 	}
+}
+
+func TestDBReopenNoFileCollision(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultDBConfig()
+	cfg.Dir = dir
+	cfg.MaxMemBytes = 100 // small to force SSTables
+
+	// Session 1: write data, creating SSTables.
+	db, err := OpenDB(cfg)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	for i := range 50 {
+		if err := db.Put(fmt.Sprintf("k%04d", i), []byte("v1")); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Collect existing SSTable filenames.
+	existing, _ := filepath.Glob(filepath.Join(dir, "sstable_*.sst"))
+	existingSet := make(map[string]bool)
+	for _, p := range existing {
+		existingSet[filepath.Base(p)] = true
+	}
+
+	// Session 2: reopen, write more data.
+	db2, err := OpenDB(cfg)
+	if err != nil {
+		t.Fatalf("OpenDB (reopen): %v", err)
+	}
+	for i := 50; i < 100; i++ {
+		if err := db2.Put(fmt.Sprintf("k%04d", i), []byte("v2")); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+	}
+	if err := db2.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// All new SSTables should have unique names.
+	allFiles, _ := filepath.Glob(filepath.Join(dir, "sstable_*.sst"))
+	seen := make(map[string]bool)
+	for _, p := range allFiles {
+		base := filepath.Base(p)
+		if seen[base] {
+			t.Fatalf("duplicate SSTable filename: %s", base)
+		}
+		seen[base] = true
+	}
+
+	// Verify all data is readable.
+	db3, err := OpenDB(cfg)
+	if err != nil {
+		t.Fatalf("OpenDB (verify): %v", err)
+	}
+	defer db3.Close()
+	for i := range 100 {
+		key := fmt.Sprintf("k%04d", i)
+		if _, ok := db3.Get(key); !ok {
+			t.Fatalf("expected key %q to be found after reopen", key)
+		}
+	}
+}
+
+func TestSSTableWriterSetSeq(t *testing.T) {
+	dir := t.TempDir()
+	w := &SSTableWriter{Dir: dir}
+	w.SetSeq(100)
+
+	sl := NewSkipList(4096)
+	sl.Insert("a", []byte("1"))
+
+	info, err := w.WriteFromIterator(sl.NewIterator(), sl.bloom)
+	if err != nil {
+		t.Fatalf("WriteFromIterator: %v", err)
+	}
+
+	base := filepath.Base(info.Path)
+	if !strings.HasPrefix(base, "sstable_000101") {
+		t.Fatalf("expected file starting with sstable_000101, got %s", base)
+	}
+}
+
+func TestDBPutAfterClose(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultDBConfig()
+	cfg.Dir = dir
+
+	db, err := OpenDB(cfg)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	db.Close()
+
+	err = db.Put("key", []byte("val"))
+	if !errors.Is(err, ErrDBClosed) {
+		t.Fatalf("expected ErrDBClosed, got %v", err)
+	}
+}
+
+func TestDBDeleteAfterClose(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultDBConfig()
+	cfg.Dir = dir
+
+	db, err := OpenDB(cfg)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	db.Close()
+
+	err = db.Delete("key")
+	if !errors.Is(err, ErrDBClosed) {
+		t.Fatalf("expected ErrDBClosed, got %v", err)
+	}
+}
+
+func TestDBPutNilValueReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultDBConfig()
+	cfg.Dir = dir
+
+	db, err := OpenDB(cfg)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	defer db.Close()
+
+	// nil value should be rejected.
+	err = db.Put("key", nil)
+	if !errors.Is(err, ErrNilValue) {
+		t.Fatalf("expected ErrNilValue, got %v", err)
+	}
+
+	// Empty value (not nil) should succeed.
+	if err := db.Put("key", []byte{}); err != nil {
+		t.Fatalf("Put(empty): %v", err)
+	}
+
+	val, ok := db.Get("key")
+	if !ok {
+		t.Fatal("expected key to be found")
+	}
+	if len(val) != 0 {
+		t.Fatalf("expected empty value, got %q", val)
+	}
+}
+
+func TestDBConcurrentPutFlush(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultDBConfig()
+	cfg.Dir = dir
+	cfg.MaxMemBytes = 100 // small to force many rotations
+
+	db, err := OpenDB(cfg)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+
+	const goroutines = 8
+	const keysPerGoroutine = 100
+	var wg sync.WaitGroup
+	errCh := make(chan error, goroutines)
+
+	for g := range goroutines {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for i := range keysPerGoroutine {
+				key := fmt.Sprintf("g%02d-k%04d", id, i)
+				if err := db.Put(key, []byte("val")); err != nil {
+					errCh <- fmt.Errorf("goroutine %d: Put(%q): %w", id, key, err)
+					return
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		t.Fatal(err)
+	}
+
+	// Verify no duplicate SSTable paths in L0.
+	l0 := db.levels.GetLevel(0)
+	paths := make(map[string]bool)
+	for _, meta := range l0 {
+		if paths[meta.Path] {
+			t.Fatalf("duplicate L0 SSTable path: %s", meta.Path)
+		}
+		paths[meta.Path] = true
+	}
+
+	// Verify all keys are readable.
+	for g := range goroutines {
+		for i := range keysPerGoroutine {
+			key := fmt.Sprintf("g%02d-k%04d", g, i)
+			if _, ok := db.Get(key); !ok {
+				t.Fatalf("expected key %q to be found", key)
+			}
+		}
+	}
+
+	db.Close()
 }

@@ -7,11 +7,15 @@ import (
 	"sync/atomic"
 )
 
-var sstableSeq atomic.Uint64
-
 // SSTableWriter writes immutable skip lists to SSTable files.
 type SSTableWriter struct {
 	Dir string
+	seq atomic.Uint64
+}
+
+// SetSeq sets the file sequence counter so new SSTables start after existing ones.
+func (w *SSTableWriter) SetSeq(n uint64) {
+	w.seq.Store(n)
 }
 
 // SSTableInfo describes a written SSTable file.
@@ -34,7 +38,7 @@ func (w *SSTableWriter) WriteSSTable(sl *SkipList) (string, error) {
 // WriteFromIterator writes all entries from an Iterator into a new SSTable file.
 // The provided bloom filter is written into the file; if nil, a new one is built.
 func (w *SSTableWriter) WriteFromIterator(iter Iterator, bloom *BloomFilter) (SSTableInfo, error) {
-	seq := sstableSeq.Add(1)
+	seq := w.seq.Add(1)
 	name := fmt.Sprintf("sstable_%06d.sst", seq)
 	finalPath := filepath.Join(w.Dir, name)
 	tmpPath := finalPath + ".tmp"
@@ -184,7 +188,7 @@ func (w *SSTableWriter) WriteFromIterator(iter Iterator, bloom *BloomFilter) (SS
 // When skipTombstones is true, tombstone entries are omitted (used at the
 // bottommost level where tombstones can be safely dropped).
 func (w *SSTableWriter) WriteLimitedFromIterator(iter Iterator, maxBytes int64, skipTombstones bool) (SSTableInfo, bool, error) {
-	seq := sstableSeq.Add(1)
+	seq := w.seq.Add(1)
 	name := fmt.Sprintf("sstable_%06d.sst", seq)
 	finalPath := filepath.Join(w.Dir, name)
 	tmpPath := finalPath + ".tmp"

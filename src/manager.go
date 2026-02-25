@@ -3,7 +3,7 @@ package main
 import "sync"
 
 type MemTable struct {
-	mu         sync.Mutex
+	mu         sync.RWMutex
 	active     *SkipList
 	immutables []*SkipList
 	maxBytes   int64
@@ -33,8 +33,8 @@ func (m *MemTable) Insert(key string, value []byte) error {
 // Search looks up a key in the active memtable and immutables.
 // Returns (value, true) if found, (nil, true) if tombstone found, (nil, false) if not found.
 func (m *MemTable) Search(key string) ([]byte, bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 
 	if val, ok := m.active.Search(key); ok {
 		return val, true // val==nil means tombstone
@@ -75,8 +75,8 @@ func (m *MemTable) RotateActive() {
 }
 
 func (m *MemTable) GetImmutables() []*SkipList {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	result := make([]*SkipList, len(m.immutables))
 	copy(result, m.immutables)
 	return result

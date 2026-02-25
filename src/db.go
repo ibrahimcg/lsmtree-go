@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 )
 
 // DBConfig holds configuration for the database.
@@ -24,9 +25,16 @@ func DefaultDBConfig() DBConfig {
 	}
 }
 
+var (
+	ErrDBClosed = errors.New("db: closed")
+	ErrNilValue = errors.New("db: nil value not allowed, use Delete instead")
+)
+
 // DB is the top-level database struct tying together memtable, levels, compaction, and manifest.
 type DB struct {
 	mu       sync.RWMutex // protects level state during reads vs compaction
+	flushMu  sync.Mutex   // serializes flushImmutables calls
+	closed   atomic.Bool
 	memtable *MemTable
 	levels   *LevelManager
 	writer   *SSTableWriter
@@ -55,13 +63,14 @@ func OpenDB(config DBConfig) (*DB, error) {
 		return nil, fmt.Errorf("db: open manifest: %w", err)
 	}
 
-	levels, err := mf.Replay(config.Compaction)
+	levels, maxFileSeq, err := mf.Replay(config.Compaction)
 	if err != nil {
 		mf.Close()
 		return nil, fmt.Errorf("db: replay manifest: %w", err)
 	}
 
 	writer := &SSTableWriter{Dir: config.Dir}
+	writer.SetSeq(maxFileSeq)
 
 	db := &DB{
 		memtable: NewMemTable(config.MaxMemBytes),
@@ -83,6 +92,12 @@ func OpenDB(config DBConfig) (*DB, error) {
 // Put inserts or updates a key-value pair.
 // If the memtable rotates, the immutable is flushed to L0.
 func (db *DB) Put(key string, value []byte) error {
+	if db.closed.Load() {
+		return ErrDBClosed
+	}
+	if value == nil {
+		return ErrNilValue
+	}
 	if err := db.memtable.Insert(key, value); err != nil {
 		return fmt.Errorf("db: put: %w", err)
 	}
@@ -155,6 +170,9 @@ func (db *DB) Get(key string) ([]byte, bool) {
 
 // Delete marks a key as deleted by inserting a tombstone.
 func (db *DB) Delete(key string) error {
+	if db.closed.Load() {
+		return ErrDBClosed
+	}
 	if err := db.memtable.Delete(key); err != nil {
 		return fmt.Errorf("db: delete: %w", err)
 	}
@@ -163,6 +181,7 @@ func (db *DB) Delete(key string) error {
 
 // Close stops the compactor, flushes remaining data, and closes the manifest.
 func (db *DB) Close() error {
+	db.closed.Store(true)
 	db.compact.Stop()
 
 	// Rotate the active memtable to immutable so it gets flushed.
@@ -177,8 +196,24 @@ func (db *DB) Close() error {
 	return db.manifest.Close()
 }
 
+// RunCompaction runs compaction synchronously until no level needs compaction.
+// This is useful for tests that need deterministic compaction without sleeps.
+func (db *DB) RunCompaction() error {
+	for {
+		level := db.levels.NeedsCompaction()
+		if level < 0 {
+			return nil
+		}
+		if err := db.compact.CompactLevel(level); err != nil {
+			return err
+		}
+	}
+}
+
 // flushImmutables flushes all pending immutable memtables to L0 SSTables.
 func (db *DB) flushImmutables() error {
+	db.flushMu.Lock()
+	defer db.flushMu.Unlock()
 	for {
 		imm := db.memtable.GetImmutables()
 		if len(imm) == 0 {

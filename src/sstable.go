@@ -35,37 +35,55 @@ type footer struct {
 
 // --- Entry encoding ---
 
-// encodeEntry packs a key/value pair as [4B key_len][key][4B val_len][value].
+const (
+	flagTombstone byte = 1 << 0
+)
+
+// encodeEntry packs a key/value pair as [4B key_len][key][1B flags][4B val_len][value].
+// A nil value is encoded as a tombstone (flags bit 0 set, val_len=0).
 func encodeEntry(key string, value []byte) []byte {
 	kl := uint32(len(key))
-	vl := uint32(len(value))
-	buf := make([]byte, 4+kl+4+vl)
+	var flags byte
+	var vl uint32
+	if value == nil {
+		flags = flagTombstone
+	} else {
+		vl = uint32(len(value))
+	}
+	buf := make([]byte, 4+kl+1+4+vl)
 	binary.LittleEndian.PutUint32(buf[0:4], kl)
 	copy(buf[4:4+kl], key)
-	binary.LittleEndian.PutUint32(buf[4+kl:8+kl], vl)
-	copy(buf[8+kl:], value)
+	buf[4+kl] = flags
+	binary.LittleEndian.PutUint32(buf[5+kl:9+kl], vl)
+	copy(buf[9+kl:], value)
 	return buf
 }
 
-// decodeEntry reads one entry from buf and returns the key, value, and bytes consumed.
-func decodeEntry(buf []byte) (string, []byte, int, error) {
+// decodeEntry reads one entry from buf and returns the key, value, bytes consumed,
+// tombstone flag, and any error.
+func decodeEntry(buf []byte) (string, []byte, int, bool, error) {
 	if len(buf) < 4 {
-		return "", nil, 0, fmt.Errorf("sstable: entry too short for key length")
+		return "", nil, 0, false, fmt.Errorf("sstable: entry too short for key length")
 	}
 	kl := binary.LittleEndian.Uint32(buf[0:4])
-	need := 4 + int(kl) + 4
+	need := 4 + int(kl) + 1 + 4 // key_len + key + flags + val_len
 	if len(buf) < need {
-		return "", nil, 0, fmt.Errorf("sstable: entry too short for key")
+		return "", nil, 0, false, fmt.Errorf("sstable: entry too short for key+flags")
 	}
 	key := string(buf[4 : 4+kl])
-	vl := binary.LittleEndian.Uint32(buf[4+kl : 8+kl])
-	total := 8 + int(kl) + int(vl)
+	flags := buf[4+kl]
+	isTombstone := flags&flagTombstone != 0
+	vl := binary.LittleEndian.Uint32(buf[5+kl : 9+kl])
+	total := 9 + int(kl) + int(vl)
 	if len(buf) < total {
-		return "", nil, 0, fmt.Errorf("sstable: entry too short for value")
+		return "", nil, 0, false, fmt.Errorf("sstable: entry too short for value")
+	}
+	if isTombstone {
+		return key, nil, total, true, nil
 	}
 	value := make([]byte, vl)
-	copy(value, buf[8+kl:total])
-	return key, value, total, nil
+	copy(value, buf[9+kl:total])
+	return key, value, total, false, nil
 }
 
 // --- Index encoding ---

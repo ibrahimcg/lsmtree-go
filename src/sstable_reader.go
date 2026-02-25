@@ -103,11 +103,14 @@ func (r *SSTableReader) Search(key string) ([]byte, bool, error) {
 	// Linear scan within the block.
 	pos := 0
 	for pos < len(blockBuf) {
-		k, v, n, err := decodeEntry(blockBuf[pos:])
+		k, v, n, tombstone, err := decodeEntry(blockBuf[pos:])
 		if err != nil {
 			return nil, false, err
 		}
 		if k == key {
+			if tombstone {
+				return nil, true, nil // found tombstone
+			}
 			return v, true, nil
 		}
 		if k > key {

@@ -226,7 +226,8 @@ func (sl *SkipList) NewIterator() *SkipListIterator {
 	return &SkipListIterator{current: sl.header.forward[0]}
 }
 
-func (it *SkipListIterator) Valid() bool { return it.current != nil }
-func (it *SkipListIterator) Key() string { return it.current.key }
-func (it *SkipListIterator) Value() []byte { return it.current.value }
-func (it *SkipListIterator) Next()         { it.current = it.current.forward[0] }
+func (it *SkipListIterator) Valid() bool      { return it.current != nil }
+func (it *SkipListIterator) Key() string      { return it.current.key }
+func (it *SkipListIterator) Value() []byte    { return it.current.value }
+func (it *SkipListIterator) IsTombstone() bool { return it.current.value == nil }
+func (it *SkipListIterator) Next()             { it.current = it.current.forward[0] }

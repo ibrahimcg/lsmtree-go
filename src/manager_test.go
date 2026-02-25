@@ -97,26 +97,32 @@ func TestMemTableDelete(t *testing.T) {
 	mt := NewMemTable(0)
 	mt.Insert("a", []byte("1"))
 
-	deleted, err := mt.Delete("a")
-	if err != nil {
+	if err := mt.Delete("a"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !deleted {
-		t.Fatal("expected delete to return true")
+	// After delete, Search returns (nil, true) — tombstone found.
+	val, ok := mt.Search("a")
+	if !ok {
+		t.Fatal("expected tombstone to be found")
 	}
-	if _, ok := mt.Search("a"); ok {
-		t.Fatal("expected key 'a' to be gone after delete")
+	if val != nil {
+		t.Fatalf("expected nil value for tombstone, got %v", val)
 	}
 }
 
 func TestMemTableDeleteMissing(t *testing.T) {
 	mt := NewMemTable(0)
-	deleted, err := mt.Delete("nope")
-	if err != nil {
+	// Deleting a non-existent key inserts a tombstone — no error expected.
+	if err := mt.Delete("nope"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if deleted {
-		t.Fatal("expected delete of missing key to return false")
+	// Searching for the tombstoned key returns (nil, true) — tombstone found.
+	val, ok := mt.Search("nope")
+	if !ok {
+		t.Fatal("expected tombstone to be found")
+	}
+	if val != nil {
+		t.Fatalf("expected nil value for tombstone, got %v", val)
 	}
 }
 

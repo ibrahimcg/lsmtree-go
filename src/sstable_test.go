@@ -22,7 +22,7 @@ func TestEncodeDecodeEntry(t *testing.T) {
 	}
 	for _, tt := range tests {
 		buf := encodeEntry(tt.key, tt.val)
-		k, v, n, err := decodeEntry(buf)
+		k, v, n, tombstone, err := decodeEntry(buf)
 		if err != nil {
 			t.Fatalf("decodeEntry error: %v", err)
 		}
@@ -34,6 +34,9 @@ func TestEncodeDecodeEntry(t *testing.T) {
 		}
 		if string(v) != string(tt.val) {
 			t.Fatalf("value: got %q, want %q", v, tt.val)
+		}
+		if tombstone {
+			t.Fatal("expected non-tombstone entry")
 		}
 	}
 }
@@ -397,5 +400,144 @@ func TestFlushImmutableNoImmutables(t *testing.T) {
 	_, err := FlushImmutable(mt, w)
 	if err == nil {
 		t.Fatal("expected error when no immutables to flush")
+	}
+}
+
+// --- WriteFromIterator tests ---
+
+func TestWriteFromIteratorMatchesWriteSSTable(t *testing.T) {
+	dir := t.TempDir()
+	sl := NewSkipList(0)
+	for i := range 100 {
+		sl.Insert(fmt.Sprintf("key-%05d", i), []byte(fmt.Sprintf("val-%05d", i)))
+	}
+	sl.MarkImmutable()
+
+	w := &SSTableWriter{Dir: dir}
+	info, err := w.WriteFromIterator(sl.NewIterator(), sl.bloom)
+	if err != nil {
+		t.Fatalf("WriteFromIterator: %v", err)
+	}
+	if info.MinKey != "key-00000" {
+		t.Fatalf("MinKey: got %q, want %q", info.MinKey, "key-00000")
+	}
+	if info.MaxKey != "key-00099" {
+		t.Fatalf("MaxKey: got %q, want %q", info.MaxKey, "key-00099")
+	}
+	if info.FileSize <= 0 {
+		t.Fatal("expected positive file size")
+	}
+
+	r, err := OpenSSTable(info.Path)
+	if err != nil {
+		t.Fatalf("OpenSSTable: %v", err)
+	}
+	defer r.Close()
+
+	for i := range 100 {
+		key := fmt.Sprintf("key-%05d", i)
+		val, found, err := r.Search(key)
+		if err != nil {
+			t.Fatalf("Search(%q) error: %v", key, err)
+		}
+		if !found {
+			t.Fatalf("key %q not found", key)
+		}
+		want := fmt.Sprintf("val-%05d", i)
+		if string(val) != want {
+			t.Fatalf("key %q: got %q, want %q", key, val, want)
+		}
+	}
+}
+
+func TestWriteLimitedSplitsOutput(t *testing.T) {
+	dir := t.TempDir()
+	sl := NewSkipList(0)
+	// Insert enough data to exceed a small maxBytes limit.
+	for i := range 200 {
+		sl.Insert(fmt.Sprintf("key-%05d", i), []byte(fmt.Sprintf("value-%05d-padding-to-make-bigger", i)))
+	}
+	sl.MarkImmutable()
+
+	w := &SSTableWriter{Dir: dir}
+	iter := sl.NewIterator()
+
+	var infos []SSTableInfo
+	for iter.Valid() {
+		info, more, err := w.WriteLimitedFromIterator(iter, 2000, false)
+		if err != nil {
+			t.Fatalf("WriteLimitedFromIterator: %v", err)
+		}
+		infos = append(infos, info)
+		if !more {
+			break
+		}
+	}
+
+	if len(infos) < 2 {
+		t.Fatalf("expected multiple output files, got %d", len(infos))
+	}
+
+	// Verify all keys are readable across all output files.
+	found := make(map[string]bool)
+	for _, info := range infos {
+		r, err := OpenSSTable(info.Path)
+		if err != nil {
+			t.Fatalf("OpenSSTable(%q): %v", info.Path, err)
+		}
+		ssit := NewSSTableIterator(r)
+		for ssit.Valid() {
+			found[ssit.Key()] = true
+			ssit.Next()
+		}
+		r.Close()
+	}
+
+	for i := range 200 {
+		key := fmt.Sprintf("key-%05d", i)
+		if !found[key] {
+			t.Fatalf("key %q missing from split output", key)
+		}
+	}
+}
+
+func TestWriteLimitedSkipsTombstones(t *testing.T) {
+	dir := t.TempDir()
+	sl := NewSkipList(0)
+	sl.Insert("alive", []byte("val"))
+	sl.Insert("dead", nil) // tombstone
+	sl.Insert("living", []byte("ok"))
+	sl.MarkImmutable()
+
+	w := &SSTableWriter{Dir: dir}
+	info, _, err := w.WriteLimitedFromIterator(sl.NewIterator(), 0, true)
+	if err != nil {
+		t.Fatalf("WriteLimitedFromIterator: %v", err)
+	}
+
+	r, err := OpenSSTable(info.Path)
+	if err != nil {
+		t.Fatalf("OpenSSTable: %v", err)
+	}
+	defer r.Close()
+
+	// "dead" should not be in the output.
+	_, found, err := r.Search("dead")
+	if err != nil {
+		t.Fatalf("Search(dead) error: %v", err)
+	}
+	if found {
+		t.Fatal("tombstone should have been skipped")
+	}
+
+	// "alive" and "living" should be present.
+	for _, key := range []string{"alive", "living"} {
+		_, found, err := r.Search(key)
+		if err != nil {
+			t.Fatalf("Search(%q) error: %v", key, err)
+		}
+		if !found {
+			t.Fatalf("expected key %q to be present", key)
+		}
 	}
 }
